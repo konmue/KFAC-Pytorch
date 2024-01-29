@@ -173,6 +173,7 @@ class ComputeCovG:
     def linear(g, layer, batch_averaged):
         # g: batch_size * out_dim
         batch_size = g.size(0)
+        assert g.ndim == 2
 
         if batch_averaged:
             cov_g = g.t() @ (g * batch_size)

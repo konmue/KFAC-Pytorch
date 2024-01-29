@@ -1,6 +1,7 @@
 import math
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Any, Optional
 
 import torch
 import torch.optim as optim
@@ -12,6 +13,7 @@ from utils.kfac_utils import ComputeCovA, ComputeCovG, update_running_stat
 class KFACMemory:
     n_steps: int
     stat_decay: float
+    name: Optional[str] = None
 
     def __post_init__(self):
         self.tensors = [None] * self.n_steps
@@ -31,6 +33,29 @@ class KFACMemory:
 
     def mean(self):
         return torch.stack(self.tensors).mean(0)
+
+
+@dataclass
+class LowKFACMemory:
+    stat_decay: float
+    name: Optional[str] = None
+    _counter: int = 0
+
+    def initialize(self, tensor):
+        self.average, self.running_sum = tensor, tensor
+
+    def in_step_update(self, tensor):
+        self.running_sum += tensor
+        self._counter += 1
+
+    def after_step_update(self):
+        self.running_sum /= self._counter
+        self._counter = 0
+        update_running_stat(self.running_sum, self.average, self.stat_decay)
+
+
+def compute_gHg(g, H):
+    ...
 
 
 class KFACOptimizer(optim.Optimizer):
@@ -61,6 +86,7 @@ class KFACOptimizer(optim.Optimizer):
         super(KFACOptimizer, self).__init__(model.parameters(), defaults)
         self.CovAHandler = ComputeCovA()
         self.CovGHandler = ComputeCovG()
+
         self.batch_averaged = batch_averaged
 
         self.known_modules = {"Linear", "Conv2d"}
@@ -72,14 +98,14 @@ class KFACOptimizer(optim.Optimizer):
         self._prepare_model()
 
         self.steps = 0
-        self.t = -1
         self.first_module = None
 
         # TODO: this could be more efficient if I treat the time and
         # TODO: batch dimension equally.
         # self.m_aa, self.m_gg = defaultdict(list), defaultdict(list)
-        make_memory = lambda: KFACMemory(n_steps=n_model_steps, stat_decay=stat_decay)
-        self.m_aa, self.m_gg = defaultdict(make_memory), defaultdict(make_memory)
+        make_aa_memory = lambda: LowKFACMemory(stat_decay=stat_decay, name="aa")
+        make_gg_memory = lambda: LowKFACMemory(stat_decay=stat_decay, name="gg")
+        self.m_aa, self.m_gg = defaultdict(make_aa_memory), defaultdict(make_gg_memory)
 
         self.Q_a, self.Q_g = {}, {}
         self.d_a, self.d_g = {}, {}
@@ -93,6 +119,8 @@ class KFACOptimizer(optim.Optimizer):
         self.TCov = TCov
         self.TInv = TInv
 
+        self.H = None
+
     def _save_input(self, module, input):
         if self.first_module is None:
             self.first_module = hash(module)
@@ -100,7 +128,7 @@ class KFACOptimizer(optim.Optimizer):
             aa = self.CovAHandler(input[0].data, module)
             if self.steps == 0:
                 self.m_aa[module].initialize(torch.diag(aa.new(aa.size(0)).fill_(1)))
-            self.m_aa[module].update(aa)
+            self.m_aa[module].in_step_update(aa)
 
     def _save_grad_output(self, module, grad_input, grad_output):
         # Accumulate statistics for Fisher matrices
@@ -108,7 +136,7 @@ class KFACOptimizer(optim.Optimizer):
             gg = self.CovGHandler(grad_output[0].data, module, self.batch_averaged)
             if self.steps == 0:
                 self.m_gg[module].initialize(torch.diag(gg.new(gg.size(0)).fill_(1)))
-            self.m_gg[module].update(gg)
+            self.m_gg[module].in_step_update(gg)
 
     def _prepare_model(self):
         count = 0
@@ -131,9 +159,10 @@ class KFACOptimizer(optim.Optimizer):
         """
         eps = 1e-10  # for numerical stability
 
-        # why do we need eigvectors; instead of just inverse?
-        self.d_a[m], self.Q_a[m] = torch.linalg.eigh(self.m_aa[m].mean())
-        self.d_g[m], self.Q_g[m] = torch.linalg.eigh(self.m_gg[m].mean())
+        self.m_aa[m].after_step_update()
+        self.m_gg[m].after_step_update()
+        self.d_a[m], self.Q_a[m] = torch.linalg.eigh(self.m_aa[m].average)
+        self.d_g[m], self.Q_g[m] = torch.linalg.eigh(self.m_gg[m].average)
 
         self.d_a[m].mul_((self.d_a[m] > eps).float())
         self.d_g[m].mul_((self.d_g[m] > eps).float())
