@@ -5,6 +5,7 @@ from typing import Optional
 
 import torch
 import torch.optim as optim
+
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG, update_running_stat
 
 
@@ -68,7 +69,6 @@ class KFACOptimizer(optim.Optimizer):
         self.steps = 0
         self.first_module = None
 
-        # self.m_aa, self.m_gg = defaultdict(list), defaultdict(list)
         make_aa_memory = lambda: KFACMemory(stat_decay=stat_decay, name="aa")
         make_gg_memory = lambda: KFACMemory(stat_decay=stat_decay, name="gg")
         self.m_aa, self.m_gg = defaultdict(make_aa_memory), defaultdict(make_gg_memory)
@@ -76,16 +76,11 @@ class KFACOptimizer(optim.Optimizer):
         self.Q_a, self.Q_g = {}, {}
         self.d_a, self.d_g = {}, {}
 
-        # self.Q_a, self.Q_g = defaultdict(list), defaultdict(list)
-        # self.d_a, self.d_g = defaultdict(list), defaultdict(list)
-
         self.stat_decay = stat_decay
 
         self.kl_clip = kl_clip
         self.TCov = TCov
         self.TInv = TInv
-
-        self.H = None
 
     def _save_input(self, module, input):
         if self.first_module is None:
