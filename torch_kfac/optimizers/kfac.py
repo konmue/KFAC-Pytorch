@@ -1,42 +1,15 @@
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 import torch.optim as optim
-
-from utils.kfac_utils import ComputeCovA, ComputeCovG, update_running_stat
+from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG, update_running_stat
 
 
 @dataclass
 class KFACMemory:
-    n_steps: int
-    stat_decay: float
-    name: Optional[str] = None
-
-    def __post_init__(self):
-        self.tensors = [None] * self.n_steps
-        self._counter = 0
-
-    def update_counter(self):
-        c = self._counter + 1
-        c = 0 if c == self.n_steps else c
-        self._counter = c
-
-    def initialize(self, tensor):
-        self.tensors[self._counter] = tensor
-
-    def update(self, tensor):
-        update_running_stat(tensor, self.tensors[self._counter], self.stat_decay)
-        self.update_counter()
-
-    def mean(self):
-        return torch.stack(self.tensors).mean(0)
-
-
-@dataclass
-class LowKFACMemory:
     stat_decay: float
     name: Optional[str] = None
     _counter: int = 0
@@ -54,15 +27,10 @@ class LowKFACMemory:
         update_running_stat(self.running_sum, self.average, self.stat_decay)
 
 
-def compute_gHg(g, H):
-    ...
-
-
 class KFACOptimizer(optim.Optimizer):
     def __init__(
         self,
         model,
-        n_model_steps: int,
         lr=0.001,
         momentum=0.9,
         stat_decay=0.95,
@@ -101,8 +69,8 @@ class KFACOptimizer(optim.Optimizer):
         self.first_module = None
 
         # self.m_aa, self.m_gg = defaultdict(list), defaultdict(list)
-        make_aa_memory = lambda: LowKFACMemory(stat_decay=stat_decay, name="aa")
-        make_gg_memory = lambda: LowKFACMemory(stat_decay=stat_decay, name="gg")
+        make_aa_memory = lambda: KFACMemory(stat_decay=stat_decay, name="aa")
+        make_gg_memory = lambda: KFACMemory(stat_decay=stat_decay, name="gg")
         self.m_aa, self.m_gg = defaultdict(make_aa_memory), defaultdict(make_gg_memory)
 
         self.Q_a, self.Q_g = {}, {}
@@ -212,7 +180,7 @@ class KFACOptimizer(optim.Optimizer):
             vg_sum += (v[0] * m.weight.grad.data * lr**2).sum().item()
             if m.bias is not None:
                 vg_sum += (v[1] * m.bias.grad.data * lr**2).sum().item()
-        nu = min(1.0, math.sqrt(self.kl_clip / vg_sum))
+        nu = min(1.0, math.sqrt(self.kl_clip / max(vg_sum, 1e-8)))
 
         for m in self.modules:
             v = updates[m]

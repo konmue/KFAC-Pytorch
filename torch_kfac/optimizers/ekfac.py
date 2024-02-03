@@ -2,32 +2,38 @@ import math
 
 import torch
 import torch.optim as optim
-
-from utils.kfac_utils import (ComputeCovA, ComputeCovG, ComputeMatGrad)
-from utils.kfac_utils import update_running_stat
+from torch_kfac.utils.kfac_utils import (
+    ComputeCovA,
+    ComputeCovG,
+    ComputeMatGrad,
+    update_running_stat,
+)
 
 
 class EKFACOptimizer(optim.Optimizer):
-    def __init__(self,
-                 model,
-                 lr=0.001,
-                 momentum=0.9,
-                 stat_decay=0.95,
-                 damping=0.001,
-                 kl_clip=0.001,
-                 weight_decay=0,
-                 TCov=10,
-                 TScal=10,
-                 TInv=100,
-                 batch_averaged=True):
+    def __init__(
+        self,
+        model,
+        lr=0.001,
+        momentum=0.9,
+        stat_decay=0.95,
+        damping=0.001,
+        kl_clip=0.001,
+        weight_decay=0,
+        TCov=10,
+        TScal=10,
+        TInv=100,
+        batch_averaged=True,
+    ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if momentum < 0.0:
             raise ValueError("Invalid momentum value: {}".format(momentum))
         if weight_decay < 0.0:
             raise ValueError("Invalid weight_decay value: {}".format(weight_decay))
-        defaults = dict(lr=lr, momentum=momentum, damping=damping,
-                        weight_decay=weight_decay)
+        defaults = dict(
+            lr=lr, momentum=momentum, damping=damping, weight_decay=weight_decay
+        )
         # TODO (CW): EKFAC optimizer now only support model as input
         super(EKFACOptimizer, self).__init__(model.parameters(), defaults)
         self.CovAHandler = ComputeCovA()
@@ -35,7 +41,7 @@ class EKFACOptimizer(optim.Optimizer):
         self.MatGradHandler = ComputeMatGrad()
         self.batch_averaged = batch_averaged
 
-        self.known_modules = {'Linear', 'Conv2d'}
+        self.known_modules = {"Linear", "Conv2d"}
 
         self.modules = []
         self.grad_outputs = {}
@@ -64,7 +70,7 @@ class EKFACOptimizer(optim.Optimizer):
             if self.steps == 0:
                 self.m_aa[module] = torch.diag(aa.new(aa.size(0)).fill_(1))
             update_running_stat(aa, self.m_aa[module], self.stat_decay)
-        if torch.is_grad_enabled() and self.steps % self.TScal == 0  and self.steps > 0:
+        if torch.is_grad_enabled() and self.steps % self.TScal == 0 and self.steps > 0:
             self.A[module] = input[0].data
 
     def _save_grad_output(self, module, grad_input, grad_output):
@@ -93,7 +99,7 @@ class EKFACOptimizer(optim.Optimizer):
                 self.modules.append(module)
                 module.register_forward_pre_hook(self._save_input)
                 module.register_backward_hook(self._save_grad_output)
-                print('(%s): %s' % (count, module))
+                print("(%s): %s" % (count, module))
                 count += 1
 
     def _update_inv(self, m):
@@ -102,10 +108,8 @@ class EKFACOptimizer(optim.Optimizer):
         :return: no returns.
         """
         eps = 1e-10  # for numerical stability
-        self.d_a[m], self.Q_a[m] = torch.symeig(
-            self.m_aa[m], eigenvectors=True)
-        self.d_g[m], self.Q_g[m] = torch.symeig(
-            self.m_gg[m], eigenvectors=True)
+        self.d_a[m], self.Q_a[m] = torch.symeig(self.m_aa[m], eigenvectors=True)
+        self.d_g[m], self.Q_g[m] = torch.symeig(self.m_gg[m], eigenvectors=True)
 
         self.d_a[m].mul_((self.d_a[m] > eps).float())
         self.d_g[m].mul_((self.d_g[m] > eps).float())
@@ -119,8 +123,10 @@ class EKFACOptimizer(optim.Optimizer):
         :param classname: the class name of the layer
         :return: a matrix form of the gradient. it should be a [output_dim, input_dim] matrix.
         """
-        if classname == 'Conv2d':
-            p_grad_mat = m.weight.grad.data.view(m.weight.grad.data.size(0), -1)  # n_filters * (in_c * kw * kh)
+        if classname == "Conv2d":
+            p_grad_mat = m.weight.grad.data.view(
+                m.weight.grad.data.size(0), -1
+            )  # n_filters * (in_c * kw * kh)
         else:
             p_grad_mat = m.weight.grad.data
         if m.bias is not None:
@@ -154,9 +160,9 @@ class EKFACOptimizer(optim.Optimizer):
         vg_sum = 0
         for m in self.modules:
             v = updates[m]
-            vg_sum += (v[0] * m.weight.grad.data * lr ** 2).sum().item()
+            vg_sum += (v[0] * m.weight.grad.data * lr**2).sum().item()
             if m.bias is not None:
-                vg_sum += (v[1] * m.bias.grad.data * lr ** 2).sum().item()
+                vg_sum += (v[1] * m.bias.grad.data * lr**2).sum().item()
         nu = min(1.0, math.sqrt(self.kl_clip / vg_sum))
 
         for m in self.modules:
@@ -171,10 +177,10 @@ class EKFACOptimizer(optim.Optimizer):
         # FIXME (CW): Modified based on SGD (removed nestrov and dampening in momentum.)
         # FIXME (CW): 1. no nesterov, 2. buf.mul_(momentum).add_(1 <del> - dampening </del>, d_p)
         for group in self.param_groups:
-            weight_decay = group['weight_decay']
-            momentum = group['momentum']
+            weight_decay = group["weight_decay"]
+            momentum = group["momentum"]
 
-            for p in group['params']:
+            for p in group["params"]:
                 if p.grad is None:
                     continue
                 d_p = p.grad.data
@@ -182,15 +188,15 @@ class EKFACOptimizer(optim.Optimizer):
                     d_p.add_(weight_decay, p.data)
                 if momentum != 0:
                     param_state = self.state[p]
-                    if 'momentum_buffer' not in param_state:
-                        buf = param_state['momentum_buffer'] = torch.zeros_like(p.data)
+                    if "momentum_buffer" not in param_state:
+                        buf = param_state["momentum_buffer"] = torch.zeros_like(p.data)
                         buf.mul_(momentum).add_(d_p)
                     else:
-                        buf = param_state['momentum_buffer']
+                        buf = param_state["momentum_buffer"]
                         buf.mul_(momentum).add_(1, d_p)
                     d_p = buf
 
-                p.data.add_(-group['lr'], d_p)
+                p.data.add_(-group["lr"], d_p)
 
     def _update_scale(self, m):
         with torch.no_grad():
@@ -199,7 +205,9 @@ class EKFACOptimizer(optim.Optimizer):
             if self.batch_averaged:
                 grad_mat *= S.size(0)
 
-            s_l = (self.Q_g[m] @ grad_mat @ self.Q_a[m].t()) ** 2  # <- this consumes too much memory!
+            s_l = (
+                self.Q_g[m] @ grad_mat @ self.Q_a[m].t()
+            ) ** 2  # <- this consumes too much memory!
             s_l = s_l.mean(dim=0)
             if self.steps == 0:
                 self.S_l[m] = s_l.new(s_l.size()).fill_(1)
@@ -221,8 +229,8 @@ class EKFACOptimizer(optim.Optimizer):
     def step(self, closure=None):
         # FIXME(CW): temporal fix for compatibility with Official LR scheduler.
         group = self.param_groups[0]
-        lr = group['lr']
-        damping = group['damping']
+        lr = group["lr"]
+        damping = group["damping"]
         updates = {}
         for m in self.modules:
             classname = m.__class__.__name__
