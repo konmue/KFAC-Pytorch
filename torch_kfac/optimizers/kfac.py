@@ -100,8 +100,6 @@ class KFACOptimizer(optim.Optimizer):
         self.steps = 0
         self.first_module = None
 
-        # TODO: this could be more efficient if I treat the time and
-        # TODO: batch dimension equally.
         # self.m_aa, self.m_gg = defaultdict(list), defaultdict(list)
         make_aa_memory = lambda: LowKFACMemory(stat_decay=stat_decay, name="aa")
         make_gg_memory = lambda: LowKFACMemory(stat_decay=stat_decay, name="gg")
