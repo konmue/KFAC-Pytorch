@@ -5,27 +5,52 @@ from typing import Optional
 
 import torch
 import torch.optim as optim
+from torch import Tensor
 
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG, update_running_stat
 
 
 @dataclass
 class KFACMemory:
-    stat_decay: float
+    """
+    In the original RNN KFAC, they just define:
+        V_0 := E[a_s a_t^T] s.t. s = t
+    - they don't specify what t to use
+    - which I guess means you average over all t's
+
+    Thus, this code uses:
+        T * V_0 <- (1/ batch_size) \sum_i \sum_t (a^i)_t (a^i)_t^T
+    i.e., approximate V_0 by averaging over time!
+        -> actually summing as we need T * V_0
+
+    TODO: Is this the correct approach?
+    """
+
+    n_steps: int
+    stat_decay: float = 0.99
     name: Optional[str] = None
     _counter: int = 0
 
-    def initialize(self, tensor):
-        self.average, self.running_sum = tensor, tensor
+    @property
+    def n_samples(self):
+        return self._counter // self.n_steps
 
-    def in_step_update(self, tensor):
-        self.running_sum += tensor
+    def initialize(self, x: Tensor) -> None:
+        self.average, self._running_sum = x, torch.zeros_like(x)
+
+    def _update_average(self, new_mean: Tensor) -> None:
+        self.average *= self.stat_decay / (1 - self.stat_decay)
+        self.average += new_mean
+        self.average *= 1 - self.stat_decay
+
+    def in_step_update(self, x: Tensor) -> None:
+        self._running_sum += x
         self._counter += 1
 
-    def after_step_update(self):
-        self.running_sum /= self._counter
+    def after_step_update(self) -> None:
+        self._update_average(self._running_sum / self.n_samples)
+        self._running_sum = torch.zeros_like(self._running_sum)
         self._counter = 0
-        update_running_stat(self.running_sum, self.average, self.stat_decay)
 
 
 class KFACOptimizer(optim.Optimizer):
@@ -69,8 +94,8 @@ class KFACOptimizer(optim.Optimizer):
         self.steps = 0
         self.first_module = None
 
-        make_aa_memory = lambda: KFACMemory(stat_decay=stat_decay, name="aa")
-        make_gg_memory = lambda: KFACMemory(stat_decay=stat_decay, name="gg")
+        make_aa_memory = lambda: KFACMemory(n_steps, stat_decay, name="aa")
+        make_gg_memory = lambda: KFACMemory(n_steps, stat_decay, name="gg")
         self.m_aa, self.m_gg = defaultdict(make_aa_memory), defaultdict(make_gg_memory)
 
         self.Q_a, self.Q_g = {}, {}
@@ -85,6 +110,9 @@ class KFACOptimizer(optim.Optimizer):
     def _save_input(self, module, input):
         if self.first_module is None:
             self.first_module = hash(module)
+
+        # ! Note: Don't enfore acc_stats = True here
+        # ! Forward pass should be the same (no matter if backprop loss or log prob)
         if torch.is_grad_enabled() and self.steps % self.TCov == 0:
             aa = self.CovAHandler(input[0].data, module)
             if self.steps == 0:
@@ -211,7 +239,6 @@ class KFACOptimizer(optim.Optimizer):
                 p.data.add_(d_p, alpha=-group["lr"])
 
     def step(self, closure=None):
-        # FIXME(CW): temporal fix for compatibility with Official LR scheduler.
         group = self.param_groups[0]
         lr = group["lr"]
         damping = group["damping"]

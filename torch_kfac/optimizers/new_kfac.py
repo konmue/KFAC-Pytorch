@@ -32,6 +32,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
     def __init__(
         self,
         model,
+        n_steps: int,
         lr=0.001,
         momentum=0.9,
         stat_decay=0.95,
@@ -72,7 +73,6 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self.CovAHandler = ComputeCovA()
         self.CovGHandler = ComputeCovG()
         self.batch_averaged = batch_averaged
-        self.stat_decay = 0  # stat_decay
         self.kl_clip = kl_clip
         self.TCov = TCov
         self.TInv = TInv
@@ -81,8 +81,9 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         # one-level KFAC vars
         self.solver = solver
 
-        make_aa_memory = lambda: KFACMemory(stat_decay=stat_decay, name="aa")
-        make_gg_memory = lambda: KFACMemory(stat_decay=stat_decay, name="gg")
+        self.stat_decay, self.initial_stat_decay = stat_decay, stat_decay
+        make_aa_memory = lambda: KFACMemory(n_steps, stat_decay, name="aa")
+        make_gg_memory = lambda: KFACMemory(n_steps, stat_decay, name="gg")
         self.m_aa, self.m_gg = defaultdict(make_aa_memory), defaultdict(make_gg_memory)
 
         self.Q_a, self.Q_g = {}, {}
