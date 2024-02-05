@@ -151,8 +151,11 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             group = self.param_groups[0]
             damping = group["damping"]
             numer = m_aa.trace() * m_gg.shape[0]
-            denom = m_gg.trace() * m_aa.shape[0]
+            denom = m_gg.trace() * (m_aa.shape[0] + 1)
             pi = numer / denom
+            print(f"trace(A): {m_aa.trace()}, trace(G): {m_gg.trace()}")
+            print(f"numer: {numer}, denom: {denom}")
+            print(f"pi: {pi}")
             assert numer > 0, f"trace(A) should be positive, got {numer}"
             assert denom > 0, f"trace(G) should be positive, got {denom}"
             diag_a = m_aa.new_full((m_aa.shape[0],), (damping * pi) ** 0.5)
