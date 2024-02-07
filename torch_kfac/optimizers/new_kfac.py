@@ -45,6 +45,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         batch_averaged=True,
         solver="symeig",
         log_every: Optional[int] = None,
+        min_damping: float = 1e-5,
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -93,6 +94,8 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             self.d_a, self.d_g = {}, {}
         else:
             self.Inv_a, self.Inv_g = {}, {}
+
+        self.min_damping = min_damping
 
         self.log_every = log_every
         self.reset_logs()
@@ -162,8 +165,10 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             pi = numer / denom
             assert numer > 0, f"trace(A) should be positive, got {numer}"
             assert denom > 0, f"trace(G) should be positive, got {denom}"
-            diag_a = m_aa.new_full((m_aa.shape[0],), (damping * pi) ** 0.5)
-            diag_g = m_gg.new_full((m_gg.shape[0],), (damping / pi) ** 0.5)
+            damping_a = torch.clamp((damping * pi) ** 0.5, min=self.min_damping)
+            damping_g = torch.clamp((damping / pi) ** 0.5, min=self.min_damping)
+            diag_a = m_aa.new_full((m_aa.shape[0],), damping_a)
+            diag_g = m_gg.new_full((m_gg.shape[0],), damping_g)
             self.Inv_a[m] = (m_aa + torch.diag(diag_a)).inverse()
             self.Inv_g[m] = (m_gg + torch.diag(diag_g)).inverse()
 
