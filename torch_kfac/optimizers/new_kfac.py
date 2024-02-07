@@ -4,9 +4,10 @@ https://raw.githubusercontent.com/ntselepidis/KFAC-Pytorch/master/optimizers/kfa
 """
 
 from collections import defaultdict
+from typing import Optional
 
 import torch
-
+import torch.nn.functional as F
 from torch_kfac.optimizers.kfac import KFACMemory
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
 
@@ -43,6 +44,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         TInv=100,
         batch_averaged=True,
         solver="symeig",
+        log_every: Optional[int] = None,
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -86,9 +88,14 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         make_gg_memory = lambda: KFACMemory(n_steps, stat_decay, name="gg")
         self.m_aa, self.m_gg = defaultdict(make_aa_memory), defaultdict(make_gg_memory)
 
-        self.Q_a, self.Q_g = {}, {}
-        self.d_a, self.d_g = {}, {}
-        self.Inv_a, self.Inv_g = {}, {}
+        if self.solver == "symeig":
+            self.Q_a, self.Q_g = {}, {}
+            self.d_a, self.d_g = {}, {}
+        else:
+            self.Inv_a, self.Inv_g = {}, {}
+
+        self.log_every = log_every
+        self.reset_logs()
 
     def _save_input(self, module, input):
         if torch.is_grad_enabled() and self.steps % self.TCov == 0:
@@ -141,8 +148,8 @@ class NewKFACOptimizer(torch.optim.Optimizer):
 
         if self.solver == "symeig":
             eps = 1e-10  # for numerical stability
-            self.d_a[m], self.Q_a[m] = torch.linalg.eigh(self.m_aa[m].average)
-            self.d_g[m], self.Q_g[m] = torch.linalg.eigh(self.m_gg[m].average)
+            self.d_a[m], self.Q_a[m] = torch.linalg.eigh(m_aa)
+            self.d_g[m], self.Q_g[m] = torch.linalg.eigh(m_gg)
 
             self.d_a[m].mul_((self.d_a[m] > eps).float())
             self.d_g[m].mul_((self.d_g[m] > eps).float())
@@ -173,6 +180,8 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             v2 = v1 / (self.d_g[m].unsqueeze(1) * self.d_a[m].unsqueeze(0) + damping)
             v = self.Q_g[m] @ v2 @ self.Q_a[m].t()
         else:
+            # This uses the identity:
+            # (A^{-1} \otimes B^{-1}) vec(V) = vec(B^{-1} V A^{-1}^\top)
             v = self.Inv_g[m] @ p_grad_mat @ self.Inv_a[m]
 
         if m.bias is not None:
@@ -183,6 +192,14 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             v[1] = v[1].view(m.bias.grad.size())
         else:
             v = [v.view(m.weight.grad.size())]
+
+        if self.logging_mode:
+            conditioned_p_grad_mat = torch.cat([v[0], v[1].unsqueeze(-1)], dim=-1)
+            conditioned_p_grad_mat = conditioned_p_grad_mat.flatten()
+            cos_sim = F.cosine_similarity(
+                p_grad_mat.flatten(), conditioned_p_grad_mat, 0
+            )
+            self.logs["cos_sim_grad_natural_grad"][m].append(cos_sim)
 
         return v
 
@@ -262,3 +279,12 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self._step(closure)
         self.steps += 1
         self.stat_decay = min(1.0 - 1.0 / (self.steps // self.TCov + 1), 0.95)
+
+    @property
+    def logging_mode(self) -> bool:
+        if self.log_every is None:
+            return False
+        return self.steps % self.log_every == 0
+
+    def reset_logs(self):
+        self.logs = defaultdict(lambda: defaultdict(list))
