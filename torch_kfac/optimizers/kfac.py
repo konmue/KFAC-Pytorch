@@ -1,12 +1,12 @@
 import math
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Optional
 
 import torch
 import torch.optim as optim
 from torch import Tensor
-
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
 
 
@@ -30,7 +30,11 @@ class KFACMemory:
     stat_decay: float = 0.99
     name: Optional[str] = None
     _counter: int = 0
-    sum_over_time: bool = True
+    sum_over_time: bool = False
+
+    @cached_property
+    def time_scale(self) -> float:
+        return 1 / (self.n_steps**0.5)
 
     @property
     def n_samples(self):
@@ -49,13 +53,14 @@ class KFACMemory:
         self._counter += 1
 
     def after_step_update(self) -> None:
-        if self.sum_over_time and self.n_samples > 0:
-            self._update_average(self._running_sum / self.n_samples)
+        if self.n_samples > 0:
+            if self.sum_over_time:
+                self._update_average(self._running_sum / self.n_samples)
 
-        # NOTE: This should be the correct approach
-        elif self._counter > 0:
-            fac = 1 / (self.n_steps**0.5 * self.n_samples)
-            self._update_average(self._running_sum * fac)
+            # NOTE: This should be the correct approach
+            else:
+                fac = self.time_scale * (1 / self.n_samples)
+                self._update_average(self._running_sum * fac)
 
         self._running_sum = torch.zeros_like(self._running_sum)
         self._counter = 0
