@@ -8,6 +8,7 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+
 from torch_kfac.optimizers.kfac import KFACMemory
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
 
@@ -45,7 +46,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         batch_averaged=True,
         solver="symeig",
         log_every: Optional[int] = None,
-        min_damping: float = 1e-5,
+        min_damping: Optional[float] = None,
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
