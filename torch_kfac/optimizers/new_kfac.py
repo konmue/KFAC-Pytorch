@@ -13,6 +13,12 @@ from torch_kfac.optimizers.kfac import KFACMemory
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
 
 
+def optional_clamp(x: torch.Tensor, min=None, max=None) -> torch.Tensor:
+    if min is None and max is None:
+        return x
+    return torch.clamp(x, min=min, max=max)
+
+
 def get_matrix_form_grad(m):
     """
     :param m: the layer
@@ -47,6 +53,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         solver="symeig",
         log_every: Optional[int] = None,
         min_damping: Optional[float] = None,
+        grad_clip_val: float = 0.0,
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -96,7 +103,12 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         else:
             self.Inv_a, self.Inv_g = {}, {}
 
+        self.time_scaling = 1 / n_steps
+
         self.min_damping = min_damping
+
+        self.grad_clip_val = grad_clip_val
+        self.clip_gradients = grad_clip_val > 0.0
 
         self.log_every = log_every
         self.reset_logs()
@@ -166,8 +178,8 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             pi = numer / denom
             assert numer > 0, f"trace(A) should be positive, got {numer}"
             assert denom > 0, f"trace(G) should be positive, got {denom}"
-            damping_a = torch.clamp((damping * pi) ** 0.5, min=self.min_damping)
-            damping_g = torch.clamp((damping / pi) ** 0.5, min=self.min_damping)
+            damping_a = optional_clamp((damping * pi) ** 0.5, min=self.min_damping)
+            damping_g = optional_clamp((damping / pi) ** 0.5, min=self.min_damping)
             diag_a = m_aa.new_full((m_aa.shape[0],), damping_a)
             diag_g = m_gg.new_full((m_gg.shape[0],), damping_g)
             self.Inv_a[m] = (m_aa + torch.diag(diag_a)).inverse()
@@ -269,7 +281,6 @@ class NewKFACOptimizer(torch.optim.Optimizer):
                 p.add_(d_p, alpha=-group["lr"])
 
     def step(self, closure=None):
-        # FIXME(CW): temporal fix for compatibility with Official LR scheduler.
         group = self.param_groups[0]
         lr = group["lr"]
         damping = group["damping"]
@@ -278,13 +289,18 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             if self.steps % self.TInv == 0:
                 self._update_inv(m)
             p_grad_mat = get_matrix_form_grad(m)
+            # p_grad_mat = p_grad_mat.clamp_(-self.grad_clip_val, self.grad_clip_val)
             v = self._get_natural_grad(m, p_grad_mat, damping)
+            if self.clip_gradients:  # clip the natural gradients
+                v = [ng.clamp_(-self.grad_clip_val, self.grad_clip_val) for ng in v]
             updates[m] = v
         self._kl_clip_and_update_grad(updates, lr)
 
         self._step(closure)
         self.steps += 1
-        self.stat_decay = min(1.0 - 1.0 / (self.steps // self.TCov + 1), 0.95)
+        self.stat_decay = min(
+            1.0 - 1.0 / (self.steps // self.TCov + 1), self.initial_stat_decay
+        )
 
     @property
     def logging_mode(self) -> bool:
