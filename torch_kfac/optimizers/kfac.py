@@ -7,6 +7,7 @@ from typing import Optional
 import torch
 import torch.optim as optim
 from torch import Tensor
+
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
 
 
