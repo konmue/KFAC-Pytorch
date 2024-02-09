@@ -63,6 +63,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         stat_decay=0.95,
         damping=0.001,
         kl_clip_params={"initial_value": 0.001, "decay": 1.0},
+        eta_max: float = 1.0,
         weight_decay=0,
         TCov=10,
         TInv=100,
@@ -106,6 +107,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self.steps = 0
 
         self.kl_clip = ExponentiallyDecayingFloat(**kl_clip_params)
+        self.eta_max = eta_max
 
         # one-level KFAC vars
         self.solver = solver
@@ -260,8 +262,8 @@ class NewKFACOptimizer(torch.optim.Optimizer):
                 vg_sum += (v[1] * m.bias.grad * lr_fac).sum()
         assert vg_sum > 0, f"vg_sum should be positive, got {vg_sum}"
 
-        # TODO: in the paper c = self.kl_clip is adapted during training.
-        eta = min(1.0, (self.kl_clip.value / vg_sum) ** 0.5)
+        # Eq. 14 in Ba et al. (2016)
+        eta = min(self.eta_max, (self.kl_clip.value / vg_sum) ** 0.5)
 
         # Set gradient to the previously computed updates * stepsize eta
         for m in self.modules:
