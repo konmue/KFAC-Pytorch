@@ -4,6 +4,7 @@ https://raw.githubusercontent.com/ntselepidis/KFAC-Pytorch/master/optimizers/kfa
 """
 
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -11,6 +12,22 @@ import torch.nn.functional as F
 
 from torch_kfac.optimizers.kfac import KFACMemory
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
+
+
+@dataclass
+class ExponentiallyDecayingFloat:
+    initial_value: float
+    decay: float = 0.99
+    update_every: int = 1
+    min_value: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        self.value, self._count = self.initial_value, 0
+
+    def step(self) -> None:
+        if self._count % self.update_every == 0:
+            self.value = max(self.decay * self.value, self.min_value or 0.0)
+        self._count += 1
 
 
 def optional_clamp(x: torch.Tensor, min=None, max=None) -> torch.Tensor:
@@ -45,7 +62,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         momentum=0.9,
         stat_decay=0.95,
         damping=0.001,
-        kl_clip=0.001,
+        kl_clip_params={"initial_value": 0.001, "decay": 1.0},
         weight_decay=0,
         TCov=10,
         TInv=100,
@@ -84,10 +101,11 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self.CovAHandler = ComputeCovA()
         self.CovGHandler = ComputeCovG()
         self.batch_averaged = batch_averaged
-        self.kl_clip = kl_clip
         self.TCov = TCov
         self.TInv = TInv
         self.steps = 0
+
+        self.kl_clip = ExponentiallyDecayingFloat(**kl_clip_params)
 
         # one-level KFAC vars
         self.solver = solver
@@ -243,7 +261,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         assert vg_sum > 0, f"vg_sum should be positive, got {vg_sum}"
 
         # TODO: in the paper c = self.kl_clip is adapted during training.
-        eta = min(1.0, (self.kl_clip / vg_sum) ** 0.5)
+        eta = min(1.0, (self.kl_clip.value / vg_sum) ** 0.5)
 
         # Set gradient to the previously computed updates * stepsize eta
         for m in self.modules:
@@ -301,6 +319,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self.stat_decay = min(
             1.0 - 1.0 / (self.steps // self.TCov + 1), self.initial_stat_decay
         )
+        self.kl_clip.step()
 
     @property
     def logging_mode(self) -> bool:
