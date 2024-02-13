@@ -9,7 +9,6 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
-
 from torch_kfac.optimizers.kfac import KFACMemory
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
 
@@ -156,6 +155,8 @@ class NewKFACOptimizer(torch.optim.Optimizer):
                 self.m_gg[module].initialize(torch.diag(gg.new(gg.size(0)).fill_(1)))
                 # self.m_gg[module].initialize(torch.zeros_like(gg))
             self.m_gg[module].in_step_update(gg)
+            if self.logging_mode:
+                self._logs["gg_norm"][module].append(gg.norm().item())
 
     def _register_modules(self):
         count = 0
@@ -237,7 +238,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             cos_sim = F.cosine_similarity(
                 p_grad_mat.flatten(), conditioned_p_grad_mat, 0
             )
-            self.logs["cos_sim_grad_natural_grad"][m].append(cos_sim)
+            self._logs["cos_sim_grad_natural_grad"][m].append(cos_sim)
 
         return v
 
@@ -302,21 +303,26 @@ class NewKFACOptimizer(torch.optim.Optimizer):
 
     def step(self, closure=None):
         group = self.param_groups[0]
-        lr = group["lr"]
-        damping = group["damping"]
+        lr, damping = group["lr"], group["damping"]
+
         updates = {}
         for m in self.modules:
+
             if self.steps % self.TInv == 0:
                 self._update_inv(m)
+
             p_grad_mat = get_matrix_form_grad(m)
-            # p_grad_mat = p_grad_mat.clamp_(-self.grad_clip_val, self.grad_clip_val)
             v = self._get_natural_grad(m, p_grad_mat, damping)
+
+            # TODO: check if I ever want to use this -> else remove
             if self.clip_gradients:  # clip the natural gradients
                 v = [ng.clamp_(-self.grad_clip_val, self.grad_clip_val) for ng in v]
-            updates[m] = v
-        self._kl_clip_and_update_grad(updates, lr)
 
+            updates[m] = v
+
+        self._kl_clip_and_update_grad(updates, lr)
         self._step(closure)
+
         self.steps += 1
         self.stat_decay = min(
             1.0 - 1.0 / (self.steps // self.TCov + 1), self.initial_stat_decay
@@ -329,5 +335,10 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             return False
         return self.steps % self.log_every == 0
 
+    def get_logs(self) -> dict:
+        logs = self._logs
+        self.reset_logs()
+        return logs
+
     def reset_logs(self):
-        self.logs = defaultdict(lambda: defaultdict(list))
+        self._logs = defaultdict(lambda: defaultdict(list))
