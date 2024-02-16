@@ -1,5 +1,6 @@
 """
-All the code in this file is from:
+The code here is based on:
+https://github.com/alecwangcq/KFAC-Pytorch/blob/master/optimizers/kfac.py
 https://raw.githubusercontent.com/ntselepidis/KFAC-Pytorch/master/optimizers/kfac.py
 """
 
