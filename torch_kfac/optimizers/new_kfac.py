@@ -239,6 +239,9 @@ class NewKFACOptimizer(torch.optim.Optimizer):
                 p_grad_mat.flatten(), conditioned_p_grad_mat, 0
             )
             self._logs["cos_sim_grad_natural_grad"][m].append(cos_sim)
+            self._logs["norm_grad_over_norm_natural_grad"][m].append(
+                p_grad_mat.norm() / conditioned_p_grad_mat.norm()
+            )
 
         return v
 
