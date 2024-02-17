@@ -10,6 +10,7 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+
 from torch_kfac.optimizers.kfac import KFACMemory
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
 
