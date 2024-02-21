@@ -71,10 +71,13 @@ class KFACLoggerAG:
             self.m_g[k].samples = []
 
     def register_hooks(self, model):
+        handles = []
         for module in model.modules():
             if isinstance(module, torch.nn.Linear):
-                module.register_forward_pre_hook(self._save_input)
-                module.register_full_backward_hook(self._save_grad_output)
+                handle_fwd = module.register_forward_pre_hook(self._save_input)
+                handle_bwd = module.register_full_backward_hook(self._save_grad_output)
+                handles.extend([handle_fwd, handle_bwd])
+        return handles
 
     @torch.no_grad()
     def _save_input(self, module, a):
