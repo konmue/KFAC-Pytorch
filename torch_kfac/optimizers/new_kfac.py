@@ -6,13 +6,38 @@ https://raw.githubusercontent.com/ntselepidis/KFAC-Pytorch/master/optimizers/kfa
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 from torch_kfac.optimizers.kfac import KFACMemory
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
+
+
+class NumpyFiFo:
+    def __init__(self, max_lenght: int) -> None:
+        self.max_lenght = max_lenght
+        self.data = np.zeros(max_lenght)
+        self.filled = False
+        self.index = 0
+
+    def append(self, value: float) -> None:
+        self.data[self.index] = value
+        self.index += 1
+        if self.index == self.max_lenght:
+            self.index = 0
+            self.filled = True
+
+    def __call__(self) -> np.ndarray:
+        return self.data
+
+    def diff(self) -> np.ndarray:
+        if self.filled:
+            return np.diff(np.roll(self.data, -self.index))
+        else:
+            return np.diff(self.data[: self.index])
 
 
 @dataclass
@@ -29,6 +54,40 @@ class ExponentiallyDecayingFloat:
         if self._count % self.update_every == 0:
             self.value = max(self.decay * self.value, self.min_value or 0.0)
         self._count += 1
+
+
+@dataclass
+class TrustRegionSize:
+    max_value: Union[float, ExponentiallyDecayingFloat]
+    min_value: float
+    no_trust_threshold: float = 0.25
+    no_trust_downscale: float = 0.25
+    max_trust_threshold: float = 0.75
+    max_trust_upscale: float = 2.0
+    # probably makes sense to be much slower in adjusting the regions than
+    # in classical optimization
+
+    def __post_init__(self) -> None:
+        self.value = self.max_value
+
+    def clamp(self) -> None:
+        self.value = max(self.min_value, self.value)
+        self.value = min(self.max_value, self.value)
+
+    def step(
+        self, actual_improvement: np.ndarray, promised_improvement: np.ndarray
+    ) -> None:
+
+        improvement_ratios = actual_improvement / promised_improvement
+        improvement_ratio = improvement_ratios.mean()
+
+        if improvement_ratio < self.no_trust_threshold:
+            self.value *= self.no_trust_downscale
+
+        elif improvement_ratio > self.max_trust_threshold:
+            self.value *= self.max_trust_upscale
+
+        self.clamp()
 
 
 def optional_clamp(x: torch.Tensor, min=None, max=None) -> torch.Tensor:
@@ -59,11 +118,11 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self,
         model,
         n_steps: int,
+        kl_clip: Union[ExponentiallyDecayingFloat, TrustRegionSize],
         lr=0.001,
         momentum=0.9,
         stat_decay=0.95,
         damping=0.001,
-        kl_clip_params={"initial_value": 0.001, "decay": 1.0},
         eta_max: float = 1.0,
         weight_decay=0,
         TCov=10,
@@ -107,7 +166,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self.TInv = TInv
         self.steps = 0
 
-        self.kl_clip = ExponentiallyDecayingFloat(**kl_clip_params)
+        self.kl_clip = kl_clip
         self.eta_max = eta_max
 
         # one-level KFAC vars
@@ -130,6 +189,9 @@ class NewKFACOptimizer(torch.optim.Optimizer):
 
         self.grad_clip_val = grad_clip_val
         self.clip_gradients = grad_clip_val > 0.0
+
+        if isinstance(self.kl_clip, TrustRegionSize):
+            self.exp_improvement_memory = NumpyFiFo(10)
 
         self.log_every = log_every
         self.reset_logs()
@@ -271,6 +333,9 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         # Eq. 14 in Ba et al. (2016)
         eta = min(self.eta_max, (self.kl_clip.value / vg_sum) ** 0.5)
 
+        if isinstance(self.kl_clip, TrustRegionSize):
+            self.exp_improvement_memory.append(1.5 * eta * vg_sum)
+
         # Set gradient to the previously computed updates * stepsize eta
         for m in self.modules:
             v = updates[m]
@@ -332,7 +397,11 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self.stat_decay = min(
             1.0 - 1.0 / (self.steps // self.TCov + 1), self.initial_stat_decay
         )
-        self.kl_clip.step()
+
+        if isinstance(self.kl_clip, ExponentiallyDecayingFloat):
+            self.kl_clip.step()
+        elif isinstance(self.kl_clip.max_value, ExponentiallyDecayingFloat):
+            self.kl_clip.max_value.step()
 
     @property
     def logging_mode(self) -> bool:
