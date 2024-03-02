@@ -16,6 +16,21 @@ from torch_kfac.optimizers.kfac import KFACMemory
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
 
 
+class PositiveDefiniteError(Exception):
+    def __init__(self, vg_sum, updates):
+        m = "vg_sum should be positive"
+        message = f"{m}, got {vg_sum}.\n"
+
+        for i, (k, v) in enumerate(updates.items()):
+            if v[0].isnan().any():
+                n_nans = v[0].isnan().sum()
+                m = f"Got nan update with {n_nans} nans for {i}th param group {k}."
+                message += f"{m}\n"
+
+        self.message = message
+        super().__init__(self.message)
+
+
 class NumpyFiFo:
     def __init__(self, max_lenght: int) -> None:
         self.max_lenght = max_lenght
@@ -328,7 +343,9 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             vg_sum += (v[0] * m.weight.grad * lr_fac).sum()
             if m.bias is not None:
                 vg_sum += (v[1] * m.bias.grad * lr_fac).sum()
-        assert vg_sum > 0, f"vg_sum should be positive, got {vg_sum}"
+
+        if not vg_sum > 0:
+            raise PositiveDefiniteError(vg_sum, updates)
 
         # Eq. 14 in Ba et al. (2016)
         eta = min(self.eta_max, (self.kl_clip.value / vg_sum) ** 0.5)
