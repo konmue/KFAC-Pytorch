@@ -11,7 +11,6 @@ from typing import Optional, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
-
 from torch_kfac.optimizers.kfac import KFACMemory
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
 
@@ -73,28 +72,35 @@ class ExponentiallyDecayingFloat:
 
 @dataclass
 class TrustRegionSize:
-    max_value: Union[float, ExponentiallyDecayingFloat]
+    max_value_params: dict
     min_value: float
     no_trust_threshold: float = 0.25
     no_trust_downscale: float = 0.25
     max_trust_threshold: float = 0.75
     max_trust_upscale: float = 2.0
+    update_every: int = 1
+    memory_size: int = 10
+    mean_of_ratios: bool = False
     # probably makes sense to be much slower in adjusting the regions than
     # in classical optimization
 
     def __post_init__(self) -> None:
-        self.value = self.max_value
+        self.max_value = ExponentiallyDecayingFloat(**self.max_value_params)
+        self.value = self.max_value.value  # initialize with max_value
 
     def clamp(self) -> None:
         self.value = max(self.min_value, self.value)
-        self.value = min(self.max_value, self.value)
+        self.value = min(self.max_value.value, self.value)
 
     def step(
         self, actual_improvement: np.ndarray, promised_improvement: np.ndarray
     ) -> None:
 
-        improvement_ratios = actual_improvement / promised_improvement
-        improvement_ratio = improvement_ratios.mean()
+        if not mean_of_ratios:
+            improvement_ratios = actual_improvement / promised_improvement
+            improvement_ratio = improvement_ratios.mean()
+        else:
+            improvement_ratio = actual_improvement.mean() / promised_improvement.mean()
 
         if improvement_ratio < self.no_trust_threshold:
             self.value *= self.no_trust_downscale
@@ -206,7 +212,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self.clip_gradients = grad_clip_val > 0.0
 
         if isinstance(self.kl_clip, TrustRegionSize):
-            self.exp_improvement_memory = NumpyFiFo(10)
+            self.exp_improvement_memory = NumpyFiFo(self.kl_clip.memory_size)
 
         self.log_every = log_every
         self.reset_logs()
@@ -352,6 +358,10 @@ class NewKFACOptimizer(torch.optim.Optimizer):
 
         if isinstance(self.kl_clip, TrustRegionSize):
             self.exp_improvement_memory.append(1.5 * eta * vg_sum)
+
+        if self.logging_mode:
+            self._logs["scalars"]["eta"] = eta
+            self._logs["scalars"]["vg_sum"] = vg_sum
 
         # Set gradient to the previously computed updates * stepsize eta
         for m in self.modules:
