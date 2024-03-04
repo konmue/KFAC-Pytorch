@@ -275,11 +275,11 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             damping = group["damping"]
             numer = m_aa.trace() * m_gg.shape[0]
             denom = m_gg.trace() * (m_aa.shape[0] + 1)
-            pi = numer / denom
+            pi_sq = numer / denom
             assert numer > 0, f"trace(A) should be positive, got {numer}"
             assert denom > 0, f"trace(G) should be positive, got {denom}"
-            damping_a = optional_clamp((damping * pi) ** 0.5, min=self.min_damping)
-            damping_g = optional_clamp((damping / pi) ** 0.5, min=self.min_damping)
+            damping_a = optional_clamp((damping * pi_sq) ** 0.5, min=self.min_damping)
+            damping_g = optional_clamp((damping / pi_sq) ** 0.5, min=self.min_damping)
             diag_a = m_aa.new_full((m_aa.shape[0],), damping_a)
             diag_g = m_gg.new_full((m_gg.shape[0],), damping_g)
             self.Inv_a[m] = (m_aa + torch.diag(diag_a)).inverse()
