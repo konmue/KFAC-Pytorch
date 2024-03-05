@@ -96,7 +96,7 @@ class TrustRegionSize:
         self, actual_improvement: np.ndarray, promised_improvement: np.ndarray
     ) -> None:
 
-        if not mean_of_ratios:
+        if not self.mean_of_ratios:
             improvement_ratios = actual_improvement / promised_improvement
             improvement_ratio = improvement_ratios.mean()
         else:
