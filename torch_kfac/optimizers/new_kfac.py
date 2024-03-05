@@ -86,6 +86,7 @@ class TrustRegionSize:
 
     def __post_init__(self) -> None:
         self.max_value = ExponentiallyDecayingFloat(**self.max_value_params)
+        self.max_value.min_value = max(self.min_value, self.max_value.min_value)
         self.value = self.max_value.value  # initialize with max_value
 
     def clamp(self) -> None:
