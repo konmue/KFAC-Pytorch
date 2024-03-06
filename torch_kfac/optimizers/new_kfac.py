@@ -322,7 +322,11 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             v = [v.view(m.weight.grad.size())]
 
         if self.logging_mode:
-            conditioned_p_grad_mat = torch.cat([v[0], v[1].unsqueeze(-1)], dim=-1)
+            if m.bias is not None:
+                conditioned_p_grad_mat = torch.cat([v[0], v[1].unsqueeze(-1)], dim=-1)
+            else:
+                conditioned_p_grad_mat = v[0]
+
             conditioned_p_grad_mat = conditioned_p_grad_mat.flatten()
             cos_sim = F.cosine_similarity(
                 p_grad_mat.flatten(), conditioned_p_grad_mat, 0
