@@ -13,7 +13,6 @@ from typing import Optional, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
-
 from torch_kfac.optimizers.kfac import KFACMemory
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
 
@@ -251,10 +250,11 @@ class NewKFACOptimizer(torch.optim.Optimizer):
                 self._logs["gg_norm"][module].append(gg.norm().item())
 
     def _register_modules(self):
+        self.id_to_layer_map = {}
         count = 0
         print(self.model)
         print("=> We keep following layers in KFAC. ")
-        for module in self.model.modules():
+        for name, module in self.model.named_modules():
             classname = module.__class__.__name__
             # print('=> We keep following layers in KFAC. <=')
             if classname in self.known_modules:
@@ -263,6 +263,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
                 module.register_full_backward_hook(self._save_grad_output)
                 print("(%s): %s" % (count, module))
                 count += 1
+                self.id_to_layer_map[id(module)] = name
 
     def _update_inv(self, m):
         """Do eigen decomposition or approximate factorization for computing inverse of the ~ fisher.
