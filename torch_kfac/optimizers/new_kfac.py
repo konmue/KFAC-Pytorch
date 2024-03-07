@@ -24,11 +24,11 @@ class PositiveDefiniteError(Exception):
         message = f"{m}, got {vg_sum}.\n"
 
         for i, (k, v) in enumerate(updates.items()):
-            if v[0].isnan().any():
-                n_nans = v[0].isnan().sum()
-                m = f"Got nan update with {n_nans} nans for {i}th param group {k}."
-                message += f"{m}\n"
-
+            for _v in v:
+                if _v.isnan().any():
+                    n_nans = _v.isnan().sum()
+                    m = f"Got nan update with {n_nans} nans for {i}th param group {k}."
+                    message += f"{m}\n"
         self.message = message
         super().__init__(self.message)
 
