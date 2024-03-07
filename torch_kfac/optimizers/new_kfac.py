@@ -4,13 +4,16 @@ https://github.com/alecwangcq/KFAC-Pytorch/blob/master/optimizers/kfac.py
 https://raw.githubusercontent.com/ntselepidis/KFAC-Pytorch/master/optimizers/kfac.py
 """
 
+import copy
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import partial
 from typing import Optional, Union
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+
 from torch_kfac.optimizers.kfac import KFACMemory
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
 
@@ -338,7 +341,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
 
         return v
 
-    def _kl_clip_and_update_grad(self, updates, lr):
+    def _kl_clip(self, updates, lr):
         # This is the KL clip suggested in
         # distributed second-order optimization using kronecker-factored approximations
         # see eq.14 and the approximation below it
@@ -371,6 +374,9 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             self._logs["scalars"]["eta"] = eta
             self._logs["scalars"]["vg_sum"] = vg_sum
 
+        return eta
+
+    def _update_grads(self, updates, eta):
         # Set gradient to the previously computed updates * stepsize eta
         for m in self.modules:
             v = updates[m]
@@ -406,9 +412,17 @@ class NewKFACOptimizer(torch.optim.Optimizer):
                 # p = p - lr * d_p
                 p.add_(d_p, alpha=-group["lr"])
 
-    def step(self, closure=None):
+    def step(
+        self,
+        closure=None,
+        linesearch_objective=None,  # Note: linesearch only for logging!
+    ):
         group = self.param_groups[0]
         lr, damping = group["lr"], group["damping"]
+
+        # track the gd updates when doing the line search logging
+        if linesearch_objective is not None:
+            gd_updates = {}
 
         updates = {}
         for m in self.modules:
@@ -425,7 +439,26 @@ class NewKFACOptimizer(torch.optim.Optimizer):
 
             updates[m] = v
 
-        self._kl_clip_and_update_grad(updates, lr)
+            if linesearch_objective is not None:
+                gd_updates[m] = p_grad_mat
+
+        eta = self._kl_clip(updates, lr)  # stepsize based on trust region size
+
+        if linesearch_objective is not None:
+            max_gd_lr = self.linesearch(
+                linesearch_objective, gd_updates, is_mat_form=True
+            )
+
+            # this maps trust region size to step size
+            ssmap = lambda x: self._kl_clip(updates, x * 100)  # start with lr = 100
+
+            max_ngd_tr = self.linesearch(linesearch_objective, updates, ssmap)
+
+            self._logs["scalars"]["max_gd_lr"] = max_gd_lr
+            self._logs["scalars"]["max_tr_size"] = max_ngd_tr
+            self._logs["scalars"]["max_ngd_lr"] = ssmap(max_ngd_tr)
+
+        self._update_grads(updates, eta)
         self._step(closure)
 
         self.steps += 1
@@ -451,3 +484,60 @@ class NewKFACOptimizer(torch.optim.Optimizer):
 
     def reset_logs(self):
         self._logs = defaultdict(lambda: defaultdict(list))
+
+    @torch.no_grad()
+    def linesearch(
+        self,
+        objective,
+        updates,
+        search_scalar_to_step_map=None,
+        max_iter=10,
+        is_mat_form=False,
+    ):
+
+        base_eval = objective(self.model)
+
+        def eval(scalar):
+            if search_scalar_to_step_map is not None:
+                scalar = search_scalar_to_step_map(scalar)
+
+            model_copy = copy.deepcopy(self.model)
+            j = 0
+            for m in model_copy.modules():
+                if isinstance(m, torch.nn.Linear):
+                    _m = self.modules[j]
+                    v = updates[_m]
+                    if is_mat_form and m.bias is not None:
+                        v = [v[:, :-1], v[:, -1:]]
+                        v[0] = v[0].view(m.weight.data.size())
+                        v[1] = v[1].view(m.bias.data.size())
+                    m.weight.add_(v[0], alpha=-scalar)
+                    if m.bias is not None:
+                        m.bias.add_(v[1], alpha=-scalar)
+                    j += 1
+            return objective(model_copy)
+
+        x = 1.0
+        for i in range(max_iter):
+            current_eval = eval(x)
+            if current_eval > base_eval:  # goal: minimize
+                x /= 10
+            else:
+                break
+
+        if i == max_iter - 1:
+            return 0.0
+
+        # now finer search
+        best_x = x
+        low, high = x, 10 * x
+        for _ in range(5):
+            mid = (high + low) / 2
+            mid_eval = eval(mid)
+            if mid_eval > current_eval:
+                low = mid
+                best_x = mid
+            else:
+                high = mid
+
+        return best_x
