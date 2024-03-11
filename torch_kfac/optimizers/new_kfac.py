@@ -5,12 +5,14 @@ https://raw.githubusercontent.com/ntselepidis/KFAC-Pytorch/master/optimizers/kfa
 """
 
 import copy
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
+from torch import Tensor
 from torch_kfac.utils.kfac_utils import (
     ComputeCovA,
     ComputeCovG,
@@ -22,6 +24,12 @@ from torch_kfac.utils.kfac_utils import (
     ScaleMemory,
     TrustRegionSize,
 )
+
+
+def cat_weight_bias(weight: Tensor, bias: Optional[Tensor] = None):
+    if bias is not None:
+        return torch.cat([weight, bias.view(-1, 1)], 1)
+    return weight
 
 
 def optional_clamp(x: torch.Tensor, min=None, max=None) -> torch.Tensor:
@@ -43,7 +51,7 @@ def get_matrix_form_grad(m):
     else:
         p_grad_mat = m.weight.grad
     if m.bias is not None:
-        p_grad_mat = torch.cat([p_grad_mat, m.bias.grad.view(-1, 1)], 1)
+        p_grad_mat = cat_weight_bias(p_grad_mat, m.bias.grad)
     return p_grad_mat
 
 
@@ -67,6 +75,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         min_damping: Optional[float] = None,
         grad_clip_val: float = 0.0,
         ekfac: bool = False,
+        ekfac_factorwise_damping: bool = True,
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -89,10 +98,11 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         super(NewKFACOptimizer, self).__init__(model.parameters(), defaults)
 
         self.ekfac = ekfac
+        self.ekfac_factorwise_damping = ekfac_factorwise_damping
         if self.ekfac:
             assert solver == "symeig", "EKFAC only supports symeig solver"
             make_scale_memory = lambda: ScaleMemory(stat_decay)
-            self.scale_memory = defaultdict(make_scale_memory)
+            self.m_scale = defaultdict(make_scale_memory)
 
         self.model = model
         self.known_modules = {"Linear", "Conv2d"}
@@ -119,7 +129,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
 
         if self.solver == "symeig":
             self.Q_a, self.Q_g = {}, {}  # eigenvectors of A and G
-            if not self.ekfac:
+            if not self.ekfac or self.ekfac_factorwise_damping:
                 self.d_a, self.d_g = {}, {}  # eigenvalues of A and G
         else:
             self.Inv_a, self.Inv_g = {}, {}
@@ -181,12 +191,10 @@ class NewKFACOptimizer(torch.optim.Optimizer):
 
                 if self.ekfac:
                     if module.bias is not None:
-                        w = torch.cat(
-                            [module.weight.data, module.bias.data.view(-1, 1)], 1
-                        )
+                        w = cat_weight_bias(module.weight.data, module.bias.data)
                     else:
                         w = module.weight.data
-                    self.scale_memory[module].initialize_like(w)
+                    self.m_scale[module].initialize_like(w)
 
     def _update_inv(self, m):
         """Do eigen decomposition or approximate factorization for computing inverse of the ~ fisher.
@@ -203,7 +211,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             eig_vals_a, self.Q_a[m] = torch.linalg.eigh(m_aa)
             eig_vals_g, self.Q_g[m] = torch.linalg.eigh(m_gg)
 
-            if not self.ekfac:
+            if not self.ekfac or self.ekfac_factorwise_damping:
                 eps = 1e-10  # for numerical stability
                 self.d_a[m], self.d_g[m] = eig_vals_a, eig_vals_g
                 self.d_a[m].mul_((self.d_a[m] > eps).float())
@@ -242,8 +250,9 @@ class NewKFACOptimizer(torch.optim.Optimizer):
                 g = m.weight.grad.data
 
             # Projecting into the KFE via: Q_g @ mat(g) @ Q_a^T
+            # and then squaring entrywise (this follows from deriviation in appendix)
             scale = (self.Q_g[m] @ g @ self.Q_a[m].t()) ** 2
-            self.scale_memory[m].update(scale)
+            self.m_scale[m].update(scale)
 
     def _get_natural_grad(self, m, p_grad_mat, damping):
         """
@@ -255,12 +264,29 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         # inv((ss')) p_grad_mat inv(aa') = [ Q_g (1/R_g) Q_g^T ] @ p_grad_mat @ [Q_a (1/R_a) Q_a^T]
         if self.solver == "symeig":
             v1 = self.Q_g[m].t() @ p_grad_mat @ self.Q_a[m]
+
             if self.ekfac:  # rescaling in the Kronecker factored Eigenspace (KFE)
-                v2 = v1 / (self.scale_memory[m].average + damping)
+
+                # The following damping mechanism is from Appendix C of EKFAC paper
+                # TODO
+                # Understand the logic behind this damping based on
+                # the eigenvals of the Kronecker factors.
+                if self.ekfac_factorwise_damping:
+                    eps = damping
+                    n_out, n_in = v1.shape
+                    damp_a = math.sqrt(eps) * self.d_a[m].repeat_interleave(n_out)
+                    damp_g = math.sqrt(eps) * self.d_g[m].repeat_interleave(n_in)
+                    damping = eps + damp_a.reshape_as(v1) + damp_g.reshape_as(v1)
+
+                    if self.logging_mode:
+                        self._logs["scalars"]["mean_efac_damp"] = damping.mean()
+
+                v2 = v1 / (self.m_scale[m].average + damping)
             else:
                 v2 = v1 / (
                     self.d_g[m].unsqueeze(1) * self.d_a[m].unsqueeze(0) + damping
                 )
+
             v = self.Q_g[m] @ v2 @ self.Q_a[m].t()
         else:
             # This uses the identity:

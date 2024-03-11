@@ -192,8 +192,8 @@ class ComputeCovG:
 class ScaleMemory:
     stat_decay: float = 0.99
 
-    def initialize_like(self, x: Tensor) -> None:
-        self.average = torch.ones_like(x)
+    def initialize_like(self, w: Tensor) -> None:
+        self.average = torch.ones_like(w)
 
     def update(self, x: Tensor) -> None:
         self.average *= self.stat_decay / (1 - self.stat_decay)
