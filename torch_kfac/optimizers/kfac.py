@@ -1,70 +1,10 @@
 import math
 from collections import defaultdict
-from dataclasses import dataclass
-from functools import cached_property
-from typing import Optional
 
 import torch
 import torch.optim as optim
-from torch import Tensor
 
 from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
-
-
-@dataclass
-class KFACMemory:
-    """
-    In the original RNN KFAC, they just define:
-        V_0 := E[a_s a_t^T] s.t. s = t
-    - they don't specify what t to use
-    - which I guess means you average over all t's
-
-    Thus, this code uses:
-        T * V_0 <- (1/ batch_size) \sum_i \sum_t (a^i)_t (a^i)_t^T
-    i.e., approximate V_0 by averaging over time!
-        -> actually summing as we need T * V_0
-
-    TODO: Is this the correct approach?
-    """
-
-    n_steps: int
-    stat_decay: float = 0.99
-    name: Optional[str] = None
-    _counter: int = 0
-    sum_over_time: bool = False
-
-    @cached_property
-    def time_scale(self) -> float:
-        return 1 / (self.n_steps**0.5)
-
-    @property
-    def n_samples(self):
-        return self._counter // self.n_steps
-
-    def initialize(self, x: Tensor) -> None:
-        self.average, self._running_sum = x, torch.zeros_like(x)
-
-    def _update_average(self, new_mean: Tensor) -> None:
-        self.average *= self.stat_decay / (1 - self.stat_decay)
-        self.average += new_mean
-        self.average *= 1 - self.stat_decay
-
-    def in_step_update(self, x: Tensor) -> None:
-        self._running_sum += x
-        self._counter += 1
-
-    def after_step_update(self) -> None:
-        if self.n_samples > 0:
-            if self.sum_over_time:
-                self._update_average(self._running_sum / self.n_samples)
-
-            # NOTE: This should be the correct approach
-            else:
-                fac = self.time_scale * (1 / self.n_samples)
-                self._update_average(self._running_sum * fac)
-
-        self._running_sum = torch.zeros_like(self._running_sum)
-        self._counter = 0
 
 
 class KFACOptimizer(optim.Optimizer):

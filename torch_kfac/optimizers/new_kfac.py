@@ -7,114 +7,21 @@ https://raw.githubusercontent.com/ntselepidis/KFAC-Pytorch/master/optimizers/kfa
 import copy
 from collections import defaultdict
 from dataclasses import dataclass
-from functools import partial
 from typing import Optional, Union
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-from torch_kfac.optimizers.kfac import KFACMemory
-from torch_kfac.utils.kfac_utils import ComputeCovA, ComputeCovG
-
-
-class PositiveDefiniteError(Exception):
-    def __init__(self, vg_sum, updates):
-        m = "vg_sum should be positive"
-        message = f"{m}, got {vg_sum}.\n"
-
-        for i, (k, v) in enumerate(updates.items()):
-            for _v in v:
-                if _v.isnan().any():
-                    n_nans = _v.isnan().sum()
-                    m = f"Got nan update with {n_nans} nans for {i}th param group {k}."
-                    message += f"{m}\n"
-        self.message = message
-        super().__init__(self.message)
-
-
-class NumpyFiFo:
-    def __init__(self, max_lenght: int) -> None:
-        self.max_lenght = max_lenght
-        self.data = np.zeros(max_lenght)
-        self.filled = False
-        self.index = 0
-
-    def append(self, value: float) -> None:
-        self.data[self.index] = value
-        self.index += 1
-        if self.index == self.max_lenght:
-            self.index = 0
-            self.filled = True
-
-    def __call__(self) -> np.ndarray:
-        return self.data
-
-    def diff(self) -> np.ndarray:
-        if self.filled:
-            return np.diff(np.roll(self.data, -self.index))
-        else:
-            return np.diff(self.data[: self.index])
-
-
-@dataclass
-class ExponentiallyDecayingFloat:
-    initial_value: float
-    decay: float = 0.99
-    update_every: int = 1
-    min_value: Optional[float] = None
-
-    def __post_init__(self) -> None:
-        self.value, self._count = self.initial_value, 0
-
-    def step(self) -> None:
-        if self._count % self.update_every == 0:
-            self.value = max(self.decay * self.value, self.min_value or 0.0)
-        self._count += 1
-
-
-@dataclass
-class TrustRegionSize:
-    max_value_params: dict
-    min_value: float
-    no_trust_threshold: float = 0.25
-    no_trust_downscale: float = 0.25
-    max_trust_threshold: float = 0.75
-    max_trust_upscale: float = 2.0
-    update_every: int = 1
-    memory_size: int = 10
-    mean_of_ratios: bool = False
-    # probably makes sense to be much slower in adjusting the regions than
-    # in classical optimization
-
-    def __post_init__(self) -> None:
-        self.max_value = ExponentiallyDecayingFloat(**self.max_value_params)
-        if self.max_value.min_value is None:
-            self.max_value.min_value = self.min_value
-        else:
-            self.max_value.min_value = max(self.min_value, self.max_value.min_value)
-        self.value = self.max_value.value  # initialize with max_value
-
-    def clamp(self) -> None:
-        self.value = max(self.min_value, self.value)
-        self.value = min(self.max_value.value, self.value)
-
-    def step(
-        self, actual_improvement: np.ndarray, promised_improvement: np.ndarray
-    ) -> None:
-
-        if not self.mean_of_ratios:
-            improvement_ratios = actual_improvement / promised_improvement
-            improvement_ratio = improvement_ratios.mean()
-        else:
-            improvement_ratio = actual_improvement.mean() / promised_improvement.mean()
-
-        if improvement_ratio < self.no_trust_threshold:
-            self.value *= self.no_trust_downscale
-
-        elif improvement_ratio > self.max_trust_threshold:
-            self.value *= self.max_trust_upscale
-
-        self.clamp()
+from torch_kfac.utils.kfac_utils import (
+    ComputeCovA,
+    ComputeCovG,
+    ComputeMatGrad,
+    ExponentiallyDecayingFloat,
+    KFACMemory,
+    NumpyFiFo,
+    PositiveDefiniteError,
+    ScaleMemory,
+    TrustRegionSize,
+)
 
 
 def optional_clamp(x: torch.Tensor, min=None, max=None) -> torch.Tensor:
@@ -159,6 +66,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         log_every: Optional[int] = None,
         min_damping: Optional[float] = None,
         grad_clip_val: float = 0.0,
+        ekfac: bool = False,
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -180,17 +88,22 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         # TODO (CW): KFAC optimizer now only support model as input
         super(NewKFACOptimizer, self).__init__(model.parameters(), defaults)
 
+        self.ekfac = ekfac
+        if self.ekfac:
+            assert solver == "symeig", "EKFAC only supports symeig solver"
+            make_scale_memory = lambda: ScaleMemory(stat_decay)
+            self.scale_memory = defaultdict(make_scale_memory)
+
         self.model = model
         self.known_modules = {"Linear", "Conv2d"}
         self.modules = []
         self._register_modules()
 
-        # utility vars
         self.CovAHandler = ComputeCovA()
         self.CovGHandler = ComputeCovG()
         self.batch_averaged = batch_averaged
-        self.TCov = TCov
-        self.TInv = TInv
+
+        self.TCov, self.TInv = TCov, TInv
         self.steps = 0
 
         self.kl_clip = kl_clip
@@ -205,8 +118,9 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self.m_aa, self.m_gg = defaultdict(make_aa_memory), defaultdict(make_gg_memory)
 
         if self.solver == "symeig":
-            self.Q_a, self.Q_g = {}, {}
-            self.d_a, self.d_g = {}, {}
+            self.Q_a, self.Q_g = {}, {}  # eigenvectors of A and G
+            if not self.ekfac:
+                self.d_a, self.d_g = {}, {}  # eigenvalues of A and G
         else:
             self.Inv_a, self.Inv_g = {}, {}
 
@@ -265,6 +179,15 @@ class NewKFACOptimizer(torch.optim.Optimizer):
                 count += 1
                 self.id_to_layer_map[id(module)] = name
 
+                if self.ekfac:
+                    if module.bias is not None:
+                        w = torch.cat(
+                            [module.weight.data, module.bias.data.view(-1, 1)], 1
+                        )
+                    else:
+                        w = module.weight.data
+                    self.scale_memory[module].initialize_like(w)
+
     def _update_inv(self, m):
         """Do eigen decomposition or approximate factorization for computing inverse of the ~ fisher.
         :param m: The layer
@@ -277,14 +200,15 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         m_gg = self.m_gg[m].average
 
         if self.solver == "symeig":
-            eps = 1e-10  # for numerical stability
-            self.d_a[m], self.Q_a[m] = torch.linalg.eigh(m_aa)
-            self.d_g[m], self.Q_g[m] = torch.linalg.eigh(m_gg)
+            eig_vals_a, self.Q_a[m] = torch.linalg.eigh(m_aa)
+            eig_vals_g, self.Q_g[m] = torch.linalg.eigh(m_gg)
 
-            self.d_a[m].mul_((self.d_a[m] > eps).float())
-            self.d_g[m].mul_((self.d_g[m] > eps).float())
+            if not self.ekfac:
+                eps = 1e-10  # for numerical stability
+                self.d_a[m], self.d_g[m] = eig_vals_a, eig_vals_g
+                self.d_a[m].mul_((self.d_a[m] > eps).float())
+                self.d_g[m].mul_((self.d_g[m] > eps).float())
         else:
-
             group = self.param_groups[0]
             damping = group["damping"]
             numer = m_aa.trace() * m_gg.shape[0]
@@ -299,6 +223,28 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             self.Inv_a[m] = (m_aa + torch.diag(diag_a)).inverse()
             self.Inv_g[m] = (m_gg + torch.diag(diag_g)).inverse()
 
+    def update_scale(self) -> None:
+        """
+        Note: does not get called within this optimizer.
+        To be called from outside.
+
+        Advantage to reference implementation: Do not need to reconstruct the
+        gradient based on the hooks, but can just access it via .grad attributes.
+
+        Assumes single batch!
+        """
+        if self.steps == 0:
+            return
+        for m in self.modules:
+            if m.bias is not None:  # gradient matrix becomes d_out x (d_in + 1)
+                g = torch.cat([m.weight.grad.data, m.bias.grad.data.view(-1, 1)], 1)
+            else:
+                g = m.weight.grad.data
+
+            # Projecting into the KFE via: Q_g @ mat(g) @ Q_a^T
+            scale = (self.Q_g[m] @ g @ self.Q_a[m].t()) ** 2
+            self.scale_memory[m].update(scale)
+
     def _get_natural_grad(self, m, p_grad_mat, damping):
         """
         :param m:  the layer
@@ -309,7 +255,12 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         # inv((ss')) p_grad_mat inv(aa') = [ Q_g (1/R_g) Q_g^T ] @ p_grad_mat @ [Q_a (1/R_a) Q_a^T]
         if self.solver == "symeig":
             v1 = self.Q_g[m].t() @ p_grad_mat @ self.Q_a[m]
-            v2 = v1 / (self.d_g[m].unsqueeze(1) * self.d_a[m].unsqueeze(0) + damping)
+            if self.ekfac:  # rescaling in the Kronecker factored Eigenspace (KFE)
+                v2 = v1 / (self.scale_memory[m].average + damping)
+            else:
+                v2 = v1 / (
+                    self.d_g[m].unsqueeze(1) * self.d_a[m].unsqueeze(0) + damping
+                )
             v = self.Q_g[m] @ v2 @ self.Q_a[m].t()
         else:
             # This uses the identity:
