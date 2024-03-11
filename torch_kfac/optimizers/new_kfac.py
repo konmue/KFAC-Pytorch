@@ -62,7 +62,8 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         kl_clip: Union[ExponentiallyDecayingFloat, TrustRegionSize],
         lr=0.001,
         momentum=0.9,
-        stat_decay=0.95,
+        stat_decay_factors=0.95,
+        stat_decay_scale=0.9,
         damping=0.001,
         eta_max: float = 1.0,
         weight_decay=0,
@@ -101,7 +102,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self.ekfac_factorwise_damping = ekfac_factorwise_damping
         if self.ekfac:
             assert solver == "symeig", "EKFAC only supports symeig solver"
-            make_scale_memory = lambda: ScaleMemory(stat_decay)
+            make_scale_memory = lambda: ScaleMemory(stat_decay_scale)
             self.m_scale = defaultdict(make_scale_memory)
 
         self.model = model
@@ -122,12 +123,15 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         # one-level KFAC vars
         self.solver = solver
 
-        self.stat_decay, self.initial_stat_decay = stat_decay, stat_decay
+        self.stat_decay, self.initial_stat_decay = (
+            stat_decay_factors,
+            stat_decay_factors,
+        )
         make_aa_memory = lambda: KFACMemory(
-            n_steps, stat_decay, name="aa", clip_val=kronecker_factors_clip_val
+            n_steps, stat_decay_factors, name="aa", clip_val=kronecker_factors_clip_val
         )
         make_gg_memory = lambda: KFACMemory(
-            n_steps, stat_decay, name="gg", clip_val=kronecker_factors_clip_val
+            n_steps, stat_decay_factors, name="gg", clip_val=kronecker_factors_clip_val
         )
         self.m_aa, self.m_gg = defaultdict(make_aa_memory), defaultdict(make_gg_memory)
 
