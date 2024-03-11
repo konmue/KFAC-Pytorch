@@ -7,16 +7,15 @@ https://raw.githubusercontent.com/ntselepidis/KFAC-Pytorch/master/optimizers/kfa
 import copy
 import math
 from collections import defaultdict
-from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+
 from torch_kfac.utils.kfac_utils import (
     ComputeCovA,
     ComputeCovG,
-    ComputeMatGrad,
     ExponentiallyDecayingFloat,
     KFACMemory,
     NumpyFiFo,
@@ -76,6 +75,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         grad_clip_val: float = 0.0,
         ekfac: bool = False,
         ekfac_factorwise_damping: bool = True,
+        kronecker_factors_clip_val: Optional[float] = None,
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -123,8 +123,12 @@ class NewKFACOptimizer(torch.optim.Optimizer):
         self.solver = solver
 
         self.stat_decay, self.initial_stat_decay = stat_decay, stat_decay
-        make_aa_memory = lambda: KFACMemory(n_steps, stat_decay, name="aa")
-        make_gg_memory = lambda: KFACMemory(n_steps, stat_decay, name="gg")
+        make_aa_memory = lambda: KFACMemory(
+            n_steps, stat_decay, name="aa", clip_val=kronecker_factors_clip_val
+        )
+        make_gg_memory = lambda: KFACMemory(
+            n_steps, stat_decay, name="gg", clip_val=kronecker_factors_clip_val
+        )
         self.m_aa, self.m_gg = defaultdict(make_aa_memory), defaultdict(make_gg_memory)
 
         if self.solver == "symeig":

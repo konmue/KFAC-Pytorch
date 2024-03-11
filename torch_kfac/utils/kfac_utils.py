@@ -222,6 +222,7 @@ class KFACMemory:
     name: Optional[str] = None
     _counter: int = 0
     sum_over_time: bool = False
+    clip_val: Optional[float] = None
 
     @cached_property
     def time_scale(self) -> float:
@@ -246,12 +247,14 @@ class KFACMemory:
     def after_step_update(self) -> None:
         if self.n_samples > 0:
             if self.sum_over_time:
-                self._update_average(self._running_sum / self.n_samples)
-
-            # NOTE: This should be the correct approach
-            else:
+                x = self._running_sum / self.n_samples
+            else:  # This is the correct approach!
                 fac = self.time_scale * (1 / self.n_samples)
-                self._update_average(self._running_sum * fac)
+                x = self._running_sum * fac
+
+            if self.clip_val is not None and self.clip_val > 0:
+                x = torch.clamp(x, -self.clip_val, self.clip_val)
+            self._update_average(x)
 
         self._running_sum = torch.zeros_like(self._running_sum)
         self._counter = 0
