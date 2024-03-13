@@ -12,7 +12,6 @@ from typing import Optional, Union
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-
 from torch_kfac.utils.kfac_utils import (
     ComputeCovA,
     ComputeCovG,
@@ -127,12 +126,8 @@ class NewKFACOptimizer(torch.optim.Optimizer):
             stat_decay_factors,
             stat_decay_factors,
         )
-        make_aa_memory = lambda: KFACMemory(
-            n_steps, stat_decay_factors, name="aa", clip_val=kronecker_factors_clip_val
-        )
-        make_gg_memory = lambda: KFACMemory(
-            n_steps, stat_decay_factors, name="gg", clip_val=kronecker_factors_clip_val
-        )
+        make_aa_memory = lambda: KFACMemory(n_steps, stat_decay_factors, name="aa")
+        make_gg_memory = lambda: KFACMemory(n_steps, stat_decay_factors, name="gg")
         self.m_aa, self.m_gg = defaultdict(make_aa_memory), defaultdict(make_gg_memory)
 
         if self.solver == "symeig":
@@ -148,6 +143,7 @@ class NewKFACOptimizer(torch.optim.Optimizer):
 
         self.grad_clip_val = grad_clip_val
         self.clip_gradients = grad_clip_val > 0.0
+        self.kronecker_factors_clip_val = kronecker_factors_clip_val
 
         if isinstance(self.kl_clip, TrustRegionSize):
             self.exp_improvement_memory = NumpyFiFo(self.kl_clip.memory_size)
@@ -170,7 +166,13 @@ class NewKFACOptimizer(torch.optim.Optimizer):
     def _save_grad_output(self, module, grad_input, grad_output):
         # Accumulate statistics for Fisher matrices
         if self.acc_stats and self.steps % self.TCov == 0:
-            gg = self.CovGHandler(grad_output[0], module, self.batch_averaged)
+            g = grad_output[0][self._sample_idx : self._sample_idx + 1]
+            gg = self.CovGHandler(
+                g,
+                module,
+                batch_averaged=False,
+                clip_val=self.kronecker_factors_clip_val,
+            )
             # Initialize buffers
             # TODO: initialize with zeros or diag?!
             if self.steps == 0:

@@ -102,9 +102,9 @@ class ComputeCovA:
         return cls.__call__(a, layer)
 
     @classmethod
-    def __call__(cls, a, layer):
+    def __call__(cls, a, layer, **kwargs):
         if isinstance(layer, nn.Linear):
-            cov_a = cls.linear(a, layer)
+            cov_a = cls.linear(a, layer, **kwargs)
         elif isinstance(layer, nn.Conv2d):
             cov_a = cls.conv2d(a, layer)
         else:
@@ -127,11 +127,13 @@ class ComputeCovA:
         return a.t() @ (a / batch_size)
 
     @staticmethod
-    def linear(a, layer):
+    def linear(a, layer, scale=1.0, clip_val: Optional[float] = None):
         # a: batch_size * in_dim
         batch_size = a.size(0)
         if layer.bias is not None:
             a = torch.cat([a, a.new(a.size(0), 1).fill_(1)], 1)
+        if clip_val is not None:
+            a = torch.where(a**2 > clip_val**2, a.sign() * clip_val, a)
         return a.t() @ (a / batch_size)
 
 
@@ -148,11 +150,11 @@ class ComputeCovG:
         return cls.__call__(g, layer, batch_averaged)
 
     @classmethod
-    def __call__(cls, g, layer, batch_averaged):
+    def __call__(cls, g, layer, batch_averaged, **kwargs):
         if isinstance(layer, nn.Conv2d):
             cov_g = cls.conv2d(g, layer, batch_averaged)
         elif isinstance(layer, nn.Linear):
-            cov_g = cls.linear(g, layer, batch_averaged)
+            cov_g = cls.linear(g, layer, batch_averaged, **kwargs)
         else:
             cov_g = None
 
@@ -176,10 +178,13 @@ class ComputeCovG:
         return cov_g
 
     @staticmethod
-    def linear(g, layer, batch_averaged):
+    def linear(g, layer, batch_averaged, scale=1.0, clip_val: Optional[float] = None):
         # g: batch_size * out_dim
         batch_size = g.size(0)
         assert g.ndim == 2
+
+        if clip_val is not None:
+            g = torch.where(g**2 > clip_val**2, g.sign() * clip_val, g)
 
         if batch_averaged:
             cov_g = g.t() @ (g * batch_size)
@@ -222,7 +227,6 @@ class KFACMemory:
     name: Optional[str] = None
     _counter: int = 0
     sum_over_time: bool = False
-    clip_val: Optional[float] = None
 
     @cached_property
     def time_scale(self) -> float:
@@ -252,8 +256,6 @@ class KFACMemory:
                 fac = self.time_scale * (1 / self.n_samples)
                 x = self._running_sum * fac
 
-            if self.clip_val is not None and self.clip_val > 0:
-                x = torch.clamp(x, -self.clip_val, self.clip_val)
             self._update_average(x)
 
         self._running_sum = torch.zeros_like(self._running_sum)
