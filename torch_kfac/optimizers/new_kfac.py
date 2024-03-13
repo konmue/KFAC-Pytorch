@@ -12,6 +12,7 @@ from typing import Optional, Union
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+
 from torch_kfac.utils.kfac_utils import (
     ComputeCovA,
     ComputeCovG,
@@ -181,6 +182,9 @@ class NewKFACOptimizer(torch.optim.Optimizer):
                 # self.m_gg[module].initialize(torch.zeros_like(gg))
             self.m_gg[module].in_step_update(gg)
             if self.logging_mode:
+                g_max = self._logs["scalars"].get("g_max", None)
+                g_max = g.max().item() if g_max is None else max(g_max, g.max().item())
+                self._logs["scalars"]["g_max"] = g_max
                 self._logs["gg_norm"][module].append(gg.norm().item())
 
     def _register_modules(self):
